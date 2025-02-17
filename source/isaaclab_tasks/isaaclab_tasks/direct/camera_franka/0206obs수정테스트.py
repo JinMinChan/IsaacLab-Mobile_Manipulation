@@ -19,19 +19,18 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import sample_uniform
+from isaaclab.sensors import Camera, CameraCfg
 import matplotlib.pyplot as plt
 import os
 from ultralytics import YOLO
 import cv2
-import math
-
 @configclass
 class CameraFrankaEnvCfg(DirectRLEnvCfg):
     # 환경 설정
     episode_length_s = 8.3333  # 500 timesteps
     decimation = 2
     action_space = 12  # Ridgeback(3) + Franka(9)
-    observation_space = 30  # 예시로 추가된 관측 범위
+    observation_space = 27  # 예시로 추가된 관측 범위
     state_space = 0
 
     # 시뮬레이션 설정
@@ -117,10 +116,29 @@ class CameraFrankaEnvCfg(DirectRLEnvCfg):
                 joint_names_expr=["panda_finger_joint.*"],
                 effort_limit=200.0,
                 velocity_limit=0.2,
-                stiffness=2e3,
-                damping=1e2,
+                stiffness=1e5,
+                damping=1e3,
             ),
         },
+    )
+
+    camera = CameraCfg(
+        data_types=["rgb"],
+        prim_path="/World/envs/env_.*/Robot/summit_xl_top_structure/Camera",  # 동적 경로 설정
+        height=320,
+        width=320,
+        update_period=0.1,
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1.0e5),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(-0.235, 0.0, 1.5),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            convention="world",
+        ),
     )
 
     # valve 설정
@@ -176,13 +194,9 @@ class CameraFrankaEnvCfg(DirectRLEnvCfg):
     base_reward_scale = 1.0  # 모바일 베이스가 목표에 가까워질 때 보상 크기
     base_penalty_scale = 0.1  # 모바일 베이스의 행동에 대한 패널티 크기
 
+
 class CameraFrankaEnv(DirectRLEnv):
     cfg: CameraFrankaEnvCfg
-
-    VIRTUAL_CAMERA_FOCAL_LENGTH = 24.0
-    VIRTUAL_CAMERA_HORIZONTAL_APERTURE = 20.955
-    VIRTUAL_CAMERA_OFFSET = (-0.235, 0, 1.5)  # 로봇 베이스 기준
-    VIRTUAL_LOCAL_CAMERA_FORWARD = (-1, 0, 0)  # 로컬 forward 방향
 
     def __init__(self, cfg: CameraFrankaEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
@@ -216,7 +230,9 @@ class CameraFrankaEnv(DirectRLEnv):
 
         # 타임스텝 초기화
         self.timestep = 0  # 타임스텝 변수 추가
-
+        # 이미지 저장 경로 설정
+        self.yolo_model = YOLO('/home/vision/Downloads/minchan_yolo_320/train_franka2/weights/best.pt', verbose=False)
+        
         # Base joints 설정
         base_joints = self._robot.find_joints("base_joint_.*")[0]
         print(f"Base Joints: {base_joints}")
@@ -304,82 +320,50 @@ class CameraFrankaEnv(DirectRLEnv):
         self.valve_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
 
 
-    # -------------------- 쿼터니언을 이용한 벡터 회전 함수 --------------------
-    def _quat_rotate(self, quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
-        """
-        주어진 쿼터니언 (quat: [w, x, y, z])를 이용하여 vec를 회전시킵니다.
-        공식: v' = v + 2 * cross(q_vec, cross(q_vec, v) + q_w * v)
-        """
-        q_w = quat[0]
-        q_vec = quat[1:]
-        # dim=0을 명시하여 경고를 방지합니다.
-        t = 2 * torch.cross(q_vec, vec, dim=0)
-        rotated_vec = vec + q_w * t + torch.cross(q_vec, t, dim=0)
-        return rotated_vec
+    def save_camera_image(self):
+        """카메라로부터 최신 RGB 이미지 저장."""
+        # 최신 데이터 요청
+        self.camera.update(self.dt)  # 카메라 데이터 업데이트
 
-    # -------------------- FOV 기반 밸브 검출 함수 (카메라 프림 제거) --------------------
-    def _update_valve_detection_fov(self):
-        """
-        로봇 베이스의 pose와 가상 카메라 상수(오프셋, FOV, local forward)를 이용해,
-        밸브가 카메라의 수평 FOV 내에 있는지를 판단합니다.
-        
-        높이(z축)는 제외하고 x-y 평면 상에서 계산합니다.
-        한 번이라도 밸브가 검출되면 해당 환경의 flag는 계속 True로 유지합니다.
-        """
-        # 가상 카메라 FOV 계산 (수평 반 FOV, 라디안)
-        half_fov = math.atan((self.VIRTUAL_CAMERA_HORIZONTAL_APERTURE / 2) / self.VIRTUAL_CAMERA_FOCAL_LENGTH)
-        
-        # 고정된 카메라 오프셋과 로컬 forward 벡터 (상수)
-        camera_offset = torch.tensor(self.VIRTUAL_CAMERA_OFFSET, device=self.device, dtype=torch.float32)
-        local_camera_forward = torch.tensor(self.VIRTUAL_LOCAL_CAMERA_FORWARD, device=self.device, dtype=torch.float32)
-        
-        for env_id in range(self.num_envs):
-            # 로봇 베이스의 월드 위치와 회전
-            robot_base_pos = self._robot.data.body_pos_w[env_id, self.base_link_idx]
-            robot_base_quat = self._robot.data.body_quat_w[env_id, self.base_link_idx]
-            
-            # 카메라의 월드 위치 = 로봇 베이스의 위치 + (회전 적용한 카메라 오프셋)
-            camera_pos = robot_base_pos + self._quat_rotate(robot_base_quat, camera_offset)
-            # 카메라의 월드 forward 방향 = 보정 적용: 원래 로컬 forward가 (-1,0,0)이므로, 
-            # 실제로 정면을 바라보도록 -1을 곱해 보정
-            camera_forward = -self._quat_rotate(robot_base_quat, local_camera_forward)
-            
-            # 밸브의 월드 위치 (초기화 시 정해진 고정 위치)
-            valve_pos = self._valve.data.body_pos_w[env_id, self.valve_link_idx]
-            rel_vec = valve_pos - camera_pos
+        # 최신 데이터 저장
+        if self.camera.data.output["rgb"] is not None:
+            rgb_image = self.camera.data.output["rgb"][0, ..., :3]
+            filename = os.path.join(self.output_dir, "rgb", f"{self.timestep:04d}.jpg")
+            img = rgb_image.detach().cpu().numpy()
+            plt.imshow(img)
+            plt.axis("off")
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            plt.savefig(filename)
+            plt.close()
 
-            # x-y 평면에서 계산: z값 0으로
-            camera_forward_xy = camera_forward.clone()
-            rel_vec_xy = rel_vec.clone()
-            camera_forward_xy[2] = 0
-            rel_vec_xy[2] = 0
+    def detect_valve_with_yolo(self, env_id: int):
+        """환경별 YOLO로 밸브 탐지."""
+        # 카메라 이미지 업데이트
+        self.camera.update(self.dt * 12)
+        if self.camera.data.output["rgb"] is not None:
+            # 환경별 이미지 가져오기
+            rgb_image = self.camera.data.output["rgb"][env_id, ..., :3].cpu().numpy()
+            bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
 
-            if torch.norm(rel_vec_xy) < 1e-6:
-                current_detected = False
-                angle_val = float('nan')
-            else:
-                camera_forward_xy = camera_forward_xy / torch.norm(camera_forward_xy)
-                rel_norm_xy = rel_vec_xy / torch.norm(rel_vec_xy)
-                if torch.dot(camera_forward_xy, rel_norm_xy) > 0:
-                    dot_val = torch.dot(camera_forward_xy, rel_norm_xy)
-                    dot_val = torch.clamp(dot_val, -1.0, 1.0)
-                    angle = torch.acos(dot_val)
-                    angle_val = angle.item()
-                    current_detected = angle < half_fov
-                else:
-                    angle_val = float('nan')
-                    current_detected = False
+            # YOLO 예측 (conf > 0.8 설정)
+            results = self.yolo_model.predict(bgr_image, conf=0.8, verbose=False)
+            for box in results[0].boxes.data:
+                class_id = int(box[-1])
+                class_name = self.yolo_model.names[class_id]
+                confidence = box[-2]  # 신뢰도 값 추출
 
-            # 스티키 검출: 한 번 True면 계속 True
-            self.valve_detected_results[env_id] = self.valve_detected_results[env_id] or current_detected
+                if class_name == "valve" and confidence >= 0.8:  # 신뢰도 조건 추가
+                    # 바운딩 박스 그리기 및 저장
+                    x1, y1, x2, y2 = map(int, box[:4])
+                    cv2.rectangle(bgr_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    save_path = f"/home/vision/Downloads/isaaclab140/IsaacLab/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/direct/camera_franka/output/detect/env_{env_id}.jpg"
+                    #cv2.imwrite(save_path, bgr_image)
+                    return True
+        return False
 
-            # 디버깅용 로그 출력
-            #print(f"Env {env_id}:")
-            #print(f"  Robot Base Pos: {robot_base_pos.cpu().numpy()}")
-            #print(f"  Camera Pos: {camera_pos.cpu().numpy()}")
-            #print(f"  Camera Forward (xy): {camera_forward_xy.cpu().numpy()}")
-            #print(f"  Valve Pos: {valve_pos.cpu().numpy()}")
-            #print(f"  Angle (rad): {angle_val:.3f} / Half FOV (rad): {half_fov:.3f}")
+
+
+
 
 
     # 씬 설정
@@ -409,6 +393,7 @@ class CameraFrankaEnv(DirectRLEnv):
 
         # 씬 설정 후 카메라 초기화
         super()._setup_scene()
+        self.camera = Camera(self.cfg.camera)  # 카메라 초기화
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions = actions.clone().clamp(-1.0, 1.0)
@@ -421,13 +406,18 @@ class CameraFrankaEnv(DirectRLEnv):
 
         #self.robot_dof_targets[:, 0] = 0.0 
         #self.robot_dof_targets[:, 1] = 0.0 
-        #self.robot_dof_targets[:, 2] = 0.0 
+        self.robot_dof_targets[:, 2] = 0.0 
 
 
         self.timestep += 1  # 타임스텝 증가
+        # 이미지 저장 주기 제어 (1 step마다 저장)
+        #if self.timestep % self.cfg.decimation == 0:  # decimation 값에 따라 실제 스텝마다 저장
+        #    self.save_camera_image()
 
-        # FOV 기반 밸브 검출 업데이트 (매 타임스텝 호출)
-        self._update_valve_detection_fov()
+        # YOLO 판단 추가 (1 step마다 판단)
+        #if self.timestep % self.cfg.decimation == 0:
+        #    valve_detected = self.detect_valve_with_yolo()
+        #    print("Valve Detected:" if valve_detected else "Valve Not Detected")
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self.robot_dof_targets)
@@ -547,7 +537,7 @@ class CameraFrankaEnv(DirectRLEnv):
         # 4) 각 환경별 로컬 랜덤 위치
         #    x= 2~4,   y= -2~2
         # ---------------------------
-        random_x = sample_uniform(-2.0, 2.0, (len(env_ids), 1), device=self.device)
+        random_x = sample_uniform(2.0, 4.0, (len(env_ids), 1), device=self.device)
         random_y = sample_uniform(-2.0, 2.0, (len(env_ids), 1), device=self.device)
 
         # shape (len(env_ids), 3)
@@ -605,21 +595,21 @@ class CameraFrankaEnv(DirectRLEnv):
         to_target = self.valve_grasp_pos - self.robot_grasp_pos
 
         # Mobile의 x, y 좌표
-        mobile_xy = self._robot.data.body_pos_w[:, self.base_link_idx]
+        #mobile_xy = self._robot.data.body_pos_w[:, self.base_link_idx][:, :2]
 
         # Mobile과 Valve 간 거리
-        valve_xy = self.valve_grasp_pos
-        mobile_dist = torch.norm(mobile_xy - valve_xy, p=2, dim=-1).unsqueeze(-1)
+        #valve_xy = self._valve.data.body_pos_w[:, self.valve_link_idx][:, :2]
+        #mobile_dist = torch.norm(mobile_xy - valve_xy, p=2, dim=-1).unsqueeze(-1)
 
         obs = torch.cat(
             (
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
                 to_target,
-                self._valve.data.joint_pos[:, 0].unsqueeze(-1),
-                self._valve.data.joint_vel[:, 0].unsqueeze(-1),
+                #self._valve.data.joint_pos[:, 0].unsqueeze(-1),
+                #self._valve.data.joint_vel[:, 0].unsqueeze(-1),
                 #mobile_xy,  # Mobile의 위치
-                mobile_dist,  # Mobile과 Valve 간 거리
+                #mobile_dist,  # Mobile과 Valve 간 거리
             ),
             dim=-1,
         )
@@ -678,23 +668,13 @@ class CameraFrankaEnv(DirectRLEnv):
         valve_base_pos = self._valve.data.body_pos_w[:, self.valve_link_idx]
         mobile_dist = torch.norm(robot_base_pos[:, :2] - valve_base_pos[:, :2], p=2, dim=-1)
 
-        # 조건문 추가 - 환경별 valve_detected_results에 따른 업데이트
-        detected = torch.tensor(self.valve_detected_results, device=self.device)
-        not_detected = ~detected  # 탐지 실패 여부
-
         # 조건에 따른 Franka DOF 업데이트
-
-        self.robot_dof_targets[not_detected, 3:10] = 0.0  # Franka의 DOF를 0으로 설정
-        self.robot_dof_targets[not_detected, 4:5] = 70.0
-        self.robot_dof_targets[not_detected, 5:6] = 1.5
-        self.robot_dof_targets[not_detected, 6:7] = -160.0
-        self.robot_dof_targets[not_detected, 8:9] = 100.0
-        self.robot_dof_targets[not_detected, 0:2] = 0.0 
-
         mask = (mobile_dist < 0.75) | (mobile_dist > 0.85)
-        #self.robot_dof_targets[detected, 2:3] = 0.0
-        combined_mask = detected & mask
-        self.robot_dof_targets[combined_mask, 3:7] = 0.0
+        self.robot_dof_targets[mask, 3:10] = 0.0  # Franka의 DOF를 0으로 설정
+        self.robot_dof_targets[mask, 4:5] = 70.0
+        self.robot_dof_targets[mask, 5:6] = 1.5
+        self.robot_dof_targets[mask, 6:7] = -160.0
+        self.robot_dof_targets[mask, 8:9] = 100.0
         # Z 축 차이 계산
         z_diff = torch.abs(self.robot_grasp_pos[:, 2] - self.valve_grasp_pos[:, 2])
 
@@ -707,21 +687,19 @@ class CameraFrankaEnv(DirectRLEnv):
         
         #print(f"Valve Detected: {self.valve_detected_results}")
 
-
+        # 조건문 추가 - 환경별 valve_detected_results에 따른 업데이트
+        detected = torch.tensor(self.valve_detected_results, device=self.device)
+        not_detected = ~detected  # 탐지 실패 여부
 
         # 탐지되지 않은 환경은 이전 값을 유지
         #self.robot_dof_targets[not_detected, 0] = self.prev_robot_dof_targets[not_detected, 0]
         #self.robot_dof_targets[not_detected, 1] = self.prev_robot_dof_targets[not_detected, 1]
-        #self.robot_dof_targets[not_detected, 2] = self.prev_robot_dof_targets[not_detected, 2]
 
         # 탐지된 환경은 값 업데이트
         #self.prev_robot_dof_targets[detected, 0] = self.robot_dof_targets[detected, 0]
         #self.prev_robot_dof_targets[detected, 1] = self.robot_dof_targets[detected, 1]
-        #self.prev_robot_dof_targets[detected, 2] = self.robot_dof_targets[detected, 2]
 
         #print(self.robot_dof_targets)
-        print(z_diff)
-        
         # 저장된 값 프린트
         #print(f"X: {self.prev_robot_dof_targets[:, 0].cpu().numpy()}, Y: {self.prev_robot_dof_targets[:, 1].cpu().numpy()}")
 
@@ -754,10 +732,48 @@ class CameraFrankaEnv(DirectRLEnv):
         base_reward_scale,
         base_penalty_scale,
     ):
-        # (1) FOV 기반 밸브 검출 결과 사용
-        valve_detected_tensor = torch.tensor(self.valve_detected_results, device=self.device, dtype=torch.float32)
-        # 단순히 검출되었으면 +1, 아니면 -1의 보상 부여
-        fov_reward = torch.where(valve_detected_tensor > 0, 1.0, -1.0)
+        # ---------------------------
+        # (1) YOLO 배치 추론
+        # ---------------------------
+        DETECTION_INTERVAL = 12
+        # 12스텝마다, 아직 밸브를 찾지 못한 환경에 대해서만 한 번에 추론
+        if self.timestep % DETECTION_INTERVAL == 0:
+            undetected_envs = [i for i, detected in enumerate(self.valve_detected_results) if not detected]
+            if len(undetected_envs) > 0:
+                # 카메라 업데이트를 한 번만
+                self.camera.update(self.dt * DETECTION_INTERVAL)
+
+                # 카메라 RGB 텐서 (num_envs, H, W, 4) 가정
+                rgb_all = self.camera.data.output["rgb"]
+                if rgb_all is not None:
+                    # CPU로 복사
+                    rgb_all_np = rgb_all[..., :3].cpu().numpy()  # shape: (num_envs, H, W, 3)
+
+                    # 배치 이미지를 리스트로 구성(RGB->BGR 변환)
+                    batch_imgs = []
+                    for env_id in undetected_envs:
+                        rgb_img = rgb_all_np[env_id]
+                        bgr_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
+                        batch_imgs.append(bgr_img)
+
+                    # 한 번에 YOLO 추론
+                    results = self.yolo_model.predict(batch_imgs, conf=0.8, verbose=False)
+                    
+                    # 결과 해석
+                    for i, result in enumerate(results):
+                        env_id = undetected_envs[i]
+                        if len(result.boxes) > 0:
+                            for box in result.boxes.data:
+                                class_id = int(box[-1])
+                                class_name = self.yolo_model.names[class_id]
+                                confidence = box[-2]
+                                if class_name == "valve" and confidence >= 0.8:
+                                    self.valve_detected_results[env_id] = True
+                                    break
+
+        # self.valve_detected_results 중 True/False를 텐서로
+        valve_detected_tensor = torch.tensor(self.valve_detected_results, device=self.device)
+
         # ---------------------------
         # (2) Mobile 보상
         # ---------------------------
@@ -777,12 +793,11 @@ class CameraFrankaEnv(DirectRLEnv):
             penalty_slope * torch.abs(mobile_dist - target_dist),
         )
 
-        # ---------------------------
-        # (3) YOLO 탐지 보상
-        # ---------------------------
-        # 외부 탐지 결과 (valve_detected_tensor)가 True이면 +1, 아니면 -1을 부여합니다.
+        # YOLO 탐지 보상
         yolo_reward = []
         for env_id in range(num_envs):
+            # valve_detected_tensor[env_id] == True 이거나, 모바일 정렬 중이 아니면(+)
+            # 그렇지 않으면(-)
             if valve_detected_tensor[env_id] or (not is_mobile_phase[env_id]):
                 yolo_reward.append(1.0)
             else:
@@ -790,7 +805,7 @@ class CameraFrankaEnv(DirectRLEnv):
         yolo_reward = torch.tensor(yolo_reward, device=self.device)
 
         # ---------------------------
-        # (4) Franka 보상
+        # (3) Franka 보상
         # ---------------------------
         xy_distance = torch.norm(robot_grasp_pos[:, :2] - valve_grasp_pos[:, :2], p=2, dim=-1)
         xy_alignment_reward = 10.0 * torch.exp(-3.0 * xy_distance) * (~is_mobile_phase).float()
@@ -818,17 +833,17 @@ class CameraFrankaEnv(DirectRLEnv):
         final_reward = torch.where(is_fully_aligned, 100.0 * rot_reward / 10.0, 0.0)
 
         # ---------------------------
-        # (5) 행동 패널티
+        # (4) 행동 패널티
         # ---------------------------
         mobile_action_penalty = torch.sum(actions[:, :2]**2, dim=-1) / actions[:, :2].shape[-1]
         franka_action_penalty = torch.sum(actions[:, 3:10]**2, dim=-1) / actions[:, 3:10].shape[-1]
         action_penalty = mobile_action_penalty + franka_action_penalty
 
         # ---------------------------
-        # (6) 총 보상 계산
+        # (5) 총 보상
         # ---------------------------
         rewards = (
-            fov_reward
+            yolo_reward
             + mobile_distance_reward
             + xy_alignment_reward
             + xy_alignment_penalty
@@ -840,7 +855,7 @@ class CameraFrankaEnv(DirectRLEnv):
 
         self.extras["log"] = {
             "total_rewards": rewards.mean().item(),
-            "fov_reward": fov_reward.mean().item(),
+            "yolo_reward": yolo_reward.mean().item(),
             "mobile_distance_reward": mobile_distance_reward.mean().item(),
             "xy_alignment_reward": xy_alignment_reward.mean().item(),
             "z_reward": z_reward.mean().item(),
@@ -848,8 +863,8 @@ class CameraFrankaEnv(DirectRLEnv):
             "rot_reward": rot_reward.mean().item(),
             "action_penalty": -action_penalty.mean().item(),
         }
+        #print(valve_detected_tensor)
         return rewards
-
 
     def _compute_grasp_transforms(
         self,

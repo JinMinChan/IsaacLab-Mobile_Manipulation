@@ -1,78 +1,80 @@
-![Isaac Lab](docs/source/_static/isaaclab.jpg)
+# Valve Manipulation Environments
+
+Envirionment
+Ubuntu 22.04
+IsaacSim 4.5.0
+IsaacLab 2.0.0
+GeForce RTX 4070Ti
+Nvidia Driver 550.120
+CUDA 12.4
+
+아래에는 총 세 가지 환경 예제가 포함되어 있습니다:
+- **360_random_valve**
+- **random_valve**
+- **random_valve_ros** (ROS2로 카메라 처리를 분리한 버전)
 
 ---
 
-# Isaac Lab
+## 360_random_valve
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/20.04/)
-[![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/)
-[![pre-commit](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/pre-commit.yaml?logo=pre-commit&logoColor=white&label=pre-commit&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/pre-commit.yaml)
-[![docs status](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/docs.yaml?label=docs&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/docs.yaml)
-[![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![License](https://img.shields.io/badge/license-Apache--2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
+<video src="./360valve.mp4" controls style="max-width: 100%; height: auto;">
+  동영상을 재생할 수 없는 환경이라면, `360valve.mp4` 파일을 직접 다운로드하여 확인하세요.
+</video>
 
+### 소개
+- 밸브(Valve)가 360도 무작위 각도로 배치되어, 로봇(모바일 베이스+프랑카)이 다양한 방향에서 접근하여 밸브를 찾고 회전시킬 수 있도록 설계된 환경입니다.
+- 에피소드 시작 시 밸브 회전 각도와 로봇 초기 자세 등을 무작위화하여, 보다 **일반화된 학습**을 유도합니다.
 
-**Isaac Lab** is a GPU-accelerated, open-source framework designed to unify and simplify robotics research workflows, such as reinforcement learning, imitation learning, and motion planning. Built on [NVIDIA Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html), it combines fast and accurate physics and sensor simulation, making it an ideal choice for sim-to-real transfer in robotics.
+### 학습 명령어
+./isaaclab.sh -p scripts/reinforcement_learning/rl_games/train.py
+--task Isaac-camera-franka-Direct-v0
+--num_envs 1024
+--headless
 
-Isaac Lab provides developers with a range of essential features for accurate sensor simulation, such as RTX-based cameras, LIDAR, or contact sensors. The framework's GPU acceleration enables users to run complex simulations and computations faster, which is key for iterative processes like reinforcement learning and data-intensive tasks. Moreover, Isaac Lab can run locally or be distributed across the cloud, offering flexibility for large-scale deployments.
+- `camera_franka.py` 파일은 `360_random_valve.py`와 **동일**해야 합니다.  
+- `num_envs`가 1024를 초과하면 GPU/CPU 리소스 부족 문제가 발생할 수 있습니다.
 
-## Key Features
+### 실행 명령어
+./isaaclab.sh -p scripts/reinforcement_learning/rl_games/play.py
+--task Isaac-camera-franka-Direct-v0
+--num_envs 1
+--checkpoint logs/rl_games/camera_franka_direct/360_random_valve/nn/camera_franka_direct.pth
+- 학습 완료된 모델(`.pth`)을 원하는 버전으로 바꿔서 지정할 수 있습니다.
 
-Isaac Lab offers a comprehensive set of tools and environments designed to facilitate robot learning:
-- **Robots**: A diverse collection of robots, from manipulators, quadrupeds, to humanoids, with 16 commonly available models.
-- **Environments**: Ready-to-train implementations of more than 30 environments, which can be trained with popular reinforcement learning frameworks such as RSL RL, SKRL, RL Games, or Stable Baselines. We also support multi-agent reinforcement learning.
-- **Physics**: Rigid bodies, articulated systems, deformable objects
-- **Sensors**: RGB/depth/segmentation cameras, camera annotations, IMU, contact sensors, ray casters.
+---
 
+## random_valve
 
-## Getting Started
+<video src="./random_valve.mp4" controls style="max-width: 100%; height: auto;">
+  동영상을 재생할 수 없는 환경이라면, `random_valve.mp4` 파일을 직접 다운로드하여 확인하세요.
+</video>
 
-Our [documentation page](https://isaac-sim.github.io/IsaacLab) provides everything you need to get started, including detailed tutorials and step-by-step guides. Follow these links to learn more about:
+### 소개
+- 밸브의 위치와 각도가 무작위로 배치되는 환경입니다.
+- 로봇(모바일 베이스+프랑카)이 에피소드마다 다른 위치/자세의 밸브를 탐색하고 조작해야 하므로, **탐색(approach) 능력**과 **조작(manipulation) 능력**을 고루 학습할 수 있습니다.
 
-- [Installation steps](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html#local-installation)
-- [Reinforcement learning](https://isaac-sim.github.io/IsaacLab/main/source/overview/reinforcement-learning/rl_existing_scripts.html)
-- [Tutorials](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/index.html)
-- [Available environments](https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html)
+### 학습 명령어
+./isaaclab.sh -p scripts/reinforcement_learning/rl_games/train.py
+--task Isaac-camera-franka-Direct-v0
+--num_envs 64
+--enable_cameras
+--headless
+- `camera_franka.py` 파일은 `random_valve.py`와 **동일**해야 합니다.  
+- `num_envs`가 64를 초과하면 리소스 부족 문제가 발생할 수 있습니다.
 
+### 실행 명령어
+./isaaclab.sh -p scripts/reinforcement_learning/rl_games/play.py
+--task Isaac-camera-franka-Direct-v0
+--num_envs 1
+--enable_cameras
+--checkpoint logs/rl_games/camera_franka_direct/random_valve/nn/camera_franka_direct.pth
+- 학습된 모델(`.pth`)은 필요에 따라 다른 체크포인트로 변경 가능합니다.
 
-## Contributing to Isaac Lab
+---
 
-We wholeheartedly welcome contributions from the community to make this framework mature and useful for everyone.
-These may happen as bug reports, feature requests, or code contributions. For details, please check our
-[contribution guidelines](https://isaac-sim.github.io/IsaacLab/main/source/refs/contributing.html).
+## random_valve_ros
 
-## Troubleshooting
-
-Please see the [troubleshooting](https://isaac-sim.github.io/IsaacLab/main/source/refs/troubleshooting.html) section for
-common fixes or [submit an issue](https://github.com/isaac-sim/IsaacLab/issues).
-
-For issues related to Isaac Sim, we recommend checking its [documentation](https://docs.omniverse.nvidia.com/app_isaacsim/app_isaacsim/overview.html)
-or opening a question on its [forums](https://forums.developer.nvidia.com/c/agx-autonomous-machines/isaac/67).
-
-## Support
-
-* Please use GitHub [Discussions](https://github.com/isaac-sim/IsaacLab/discussions) for discussing ideas, asking questions, and requests for new features.
-* Github [Issues](https://github.com/isaac-sim/IsaacLab/issues) should only be used to track executable pieces of work with a definite scope and a clear deliverable. These can be fixing bugs, documentation issues, new features, or general updates.
-
-## License
-
-The Isaac Lab framework is released under [BSD-3 License](LICENSE). The `isaaclab_mimic` extension and its corresponding standalone scripts are released under [Apache 2.0](LICENSE-mimic). The license files of its dependencies and assets are present in the [`docs/licenses`](docs/licenses) directory.
-
-## Acknowledgement
-
-Isaac Lab development initiated from the [Orbit](https://isaac-orbit.github.io/) framework. We would appreciate if you would cite it in academic publications as well:
-
-```
-@article{mittal2023orbit,
-   author={Mittal, Mayank and Yu, Calvin and Yu, Qinxi and Liu, Jingzhou and Rudin, Nikita and Hoeller, David and Yuan, Jia Lin and Singh, Ritvik and Guo, Yunrong and Mazhar, Hammad and Mandlekar, Ajay and Babich, Buck and State, Gavriel and Hutter, Marco and Garg, Animesh},
-   journal={IEEE Robotics and Automation Letters},
-   title={Orbit: A Unified Simulation Framework for Interactive Robot Learning Environments},
-   year={2023},
-   volume={8},
-   number={6},
-   pages={3740-3747},
-   doi={10.1109/LRA.2023.3270034}
-}
-```
+### 소개
+- **random_valve** 환경과 동일한 무작위 밸브 배치를 사용하지만, **카메라 이미지를 ROS2 노드로 전달**하여 별도의 `yolo.py`에서 YOLO 추론을 수행하도록 구성한 버전입니다.
+- 시뮬레이션(Isaac Sim) 측과 **ROS2** 측(외부 YOLO 노드)이 **통신**하며 밸브 검출 결과를 주고받아 로봇의 행동에 반영하는 구조입니다.
+- 학습/실행 명령어는 `random_valve`와 동일하지만, **별도의 ROS2 노드를 통해 `yolo.py`** 등을 실행해야 합니다.

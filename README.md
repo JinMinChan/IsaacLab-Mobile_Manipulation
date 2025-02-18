@@ -1,12 +1,12 @@
 # Valve Manipulation Environments
 
 Envirionment
-Ubuntu 22.04
-IsaacSim 4.5.0
-IsaacLab 2.0.0
-GeForce RTX 4070Ti
-Nvidia Driver 550.120
-CUDA 12.4
+- Ubuntu 22.04
+- IsaacSim 4.5.0
+- IsaacLab 2.0.0
+- GeForce RTX 4070Ti
+- Nvidia Driver 550.120
+- CUDA 12.4
 
 아래에는 총 세 가지 환경 예제가 포함되어 있습니다:
 - **360_random_valve**
